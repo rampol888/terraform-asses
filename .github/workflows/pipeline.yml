@@ -23,7 +23,7 @@ jobs:
       global-s3: ${{ steps.filter.outputs.global-s3 }}
       payment-api: ${{ steps.filter.outputs.payment-api }}
       user-api: ${{ steps.filter.outputs.user-api }}
-      changelog-only: ${{ steps.filter.outputs.changelog-only }}
+      changelog-only: ${{ steps.changelog-check.outputs.changelog-only }}
       has-changes: ${{ steps.filter.outputs.has-changes }}
     steps:
       - name: Checkout code
