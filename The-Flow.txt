@@ -1,0 +1,67 @@
+Part 1: The Foundation — COMPLETED
+
+--> VPC with CIDR 192.168.0.0/16 (default in variables.tf)
+--> Subnets
+2 Public Subnets + 2 Private Subnets
+
+Distributed across 2 different Availability Zones
+
+--> Routing
+Public subnets have direct (IGW)
+Private subnets use NAT Gateway (no direct internet access)
+
+--> Database
+PostgreSQL RDS instance
+Instance class: db.t3.micro (default)
+Engine: PostgreSQL 15.4
+
+---> Security
+1. Database in Private Subnets (DB Subnet Group)
+2. Security group allows traffic only from VPC CIDR (port 5432)
+3. No internet access to database
+
+Part 2: The Application Layer — COMPLETED
+
+--> Load Balancer
+HTTP ALB on Port 80
+Using official terraform-aws-modules/alb/aws module (version ~> 9.0)
+Launch Template
+Instance type: t3.micro (default)
+Amazon Linux 2023 AMI (data source with filter)
+User Data installs and configures Nginx
+Health Check
+Target Group checks root path /
+Expects HTTP 200 response code
+Protocol: HTTP
+Auto Scaling Group
+Min: 1, Max: 3 (defaults in variables.tf)
+Registered with ALB target group
+Health check type: ELB
+
+
+--> flow 
+raffic flow
+User → ALB (port 80, HTTP)
+ALB → Target Group (port 80)
+Target Group → EC2 instances (port 80)
+EC2 → Nginx (port 80) → serves HTML page
+
+   terraform output alb_dns_name
+
+   http://northwind-alb-1234567890.us-east-1.elb.amazonaws.com
+
+Application startup
+--> When EC2 instances launch:
+User data script runs automatically
+Installs Nginx: yum install -y nginx
+Starts Nginx: systemctl start nginx
+Creates HTML page at /usr/share/nginx/html/index.html
+Nginx serves this page for all requests (any URL path)
+
+
+**********************************************
+Status: all 3 parts completed
+Part 1: Foundation (VPC, Subnets, Database) — completed
+Part 2: Application Layer (ALB, ASG, Launch Template) — completed
+Part 3: Smart Pipeline (CI/CD with conditional execution) — completed
+The pipeline file is at .github/workflows/pipeline.yml and implements all the required conditional execution logic.

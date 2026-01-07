@@ -1,0 +1,165 @@
+name: Terraform Smart Pipeline
+
+on:
+  push:
+    branches:
+      - main
+      - develop
+  pull_request:
+    branches:
+      - main
+      - develop
+
+env:
+  AWS_REGION: us-east-1
+  TF_VERSION: 1.6.0
+
+jobs:
+  detect-changes:
+    name: Detect Changes
+    runs-on: ubuntu-latest
+    outputs:
+      global-iam: ${{ steps.filter.outputs.global-iam }}
+      global-s3: ${{ steps.filter.outputs.global-s3 }}
+      payment-api: ${{ steps.filter.outputs.payment-api }}
+      user-api: ${{ steps.filter.outputs.user-api }}
+      changelog-only: ${{ steps.filter.outputs.changelog-only }}
+      has-changes: ${{ steps.filter.outputs.has-changes }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Detect changed files
+        uses: dorny/paths-filter@v2
+        id: filter
+        with:
+          filters: |
+            global-iam:
+              - 'global/iam/**'
+            global-s3:
+              - 'global/s3/**'
+            payment-api:
+              - 'apps/payment-api/**'
+            user-api:
+              - 'apps/user-api/**'
+            changelog-only:
+              - 'CHANGELOG.md'
+
+      - name: Determine if changes exist
+        id: changes
+        run: |
+          if [[ "${{ steps.filter.outputs.global-iam }}" == "true" ]] || \
+             [[ "${{ steps.filter.outputs.global-s3 }}" == "true" ]] || \
+             [[ "${{ steps.filter.outputs.payment-api }}" == "true" ]] || \
+             [[ "${{ steps.filter.outputs.user-api }}" == "true" ]]; then
+            echo "has-changes=true" >> $GITHUB_OUTPUT
+          else
+            echo "has-changes=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Check if only CHANGELOG changed
+        id: changelog-check
+        run: |
+          if [[ "${{ steps.filter.outputs.changelog-only }}" == "true" ]] && \
+             [[ "${{ steps.filter.outputs.global-iam }}" != "true" ]] && \
+             [[ "${{ steps.filter.outputs.global-s3 }}" != "true" ]] && \
+             [[ "${{ steps.filter.outputs.payment-api }}" != "true" ]] && \
+             [[ "${{ steps.filter.outputs.user-api }}" != "true" ]]; then
+            echo "changelog-only=true" >> $GITHUB_OUTPUT
+          else
+            echo "changelog-only=false" >> $GITHUB_OUTPUT
+          fi
+
+  terraform-plan:
+    name: Terraform Plan
+    needs: detect-changes
+    if: needs.detect-changes.outputs.changelog-only != 'true'
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - component: payment-api
+            path: apps/payment-api
+            should-run: ${{ needs.detect-changes.outputs.payment-api == 'true' || needs.detect-changes.outputs.global-iam == 'true' || needs.detect-changes.outputs.global-s3 == 'true' }}
+          - component: user-api
+            path: apps/user-api
+            should-run: ${{ needs.detect-changes.outputs.user-api == 'true' || needs.detect-changes.outputs.global-iam == 'true' || needs.detect-changes.outputs.global-s3 == 'true' }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+
+      - name: Terraform Init
+        if: matrix.should-run == 'true'
+        working-directory: ${{ matrix.path }}
+        run: terraform init
+
+      - name: Terraform Validate
+        if: matrix.should-run == 'true'
+        working-directory: ${{ matrix.path }}
+        run: terraform validate
+
+      - name: Terraform Plan
+        if: matrix.should-run == 'true'
+        id: plan
+        working-directory: ${{ matrix.path }}
+        run: |
+          terraform plan -no-color -out=tfplan | tee plan_output.txt
+          echo "plan_exit_code=$?" >> $GITHUB_OUTPUT
+        continue-on-error: true
+
+      - name: Format Plan Output
+        if: matrix.should-run == 'true' && (steps.plan.outputs.plan_exit_code == 0 || steps.plan.outputs.plan_exit_code == 2)
+        run: |
+          echo "## 📋 Terraform Plan: ${{ matrix.component }}" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo '```hcl' >> $GITHUB_STEP_SUMMARY
+          cat ${{ matrix.path }}/plan_output.txt >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Component:** \`${{ matrix.component }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "**Path:** \`${{ matrix.path }}\`" >> $GITHUB_STEP_SUMMARY
+
+      - name: Skip Message
+        if: matrix.should-run != 'true'
+        run: |
+          echo "## ⏭️ Skipped: ${{ matrix.component }}" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "No relevant changes detected for \`${{ matrix.component }}\`. Skipping Terraform plan." >> $GITHUB_STEP_SUMMARY
+
+      - name: Upload Plan Artifact
+        if: matrix.should-run == 'true' && always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: terraform-plan-${{ matrix.component }}
+          path: ${{ matrix.path }}/tfplan
+          retention-days: 5
+
+  exit-on-changelog:
+    name: Exit on CHANGELOG only
+    needs: detect-changes
+    if: needs.detect-changes.outputs.changelog-only == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Skip Terraform execution
+        run: |
+          echo "## ✅ No Infrastructure Changes Detected" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "Only \`CHANGELOG.md\` was modified. Skipping Terraform execution." >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "✅ Pipeline completed successfully without running Terraform." >> $GITHUB_STEP_SUMMARY
+
